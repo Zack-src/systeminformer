@@ -278,11 +278,11 @@ VOID ToolbarResetSettings(
     );
 
 PWSTR ToolbarGetText(
-    _In_ UINT CommandID
+    _In_ ULONG CommandID
     );
 
 HBITMAP ToolbarGetImage(
-    _In_ UINT CommandID,
+    _In_ ULONG CommandID,
     _In_ LONG DpiValue
     );
 
@@ -594,9 +594,9 @@ typedef struct _CUSTOMIZE_CONTEXT
     COLORREF TextColor;
 
     LONG WindowDpi;
-    INT CXWidth;
-    INT ImageWidth;
-    INT ImageHeight;
+    LONG CXWidth;
+    LONG ImageWidth;
+    LONG ImageHeight;
 
     HWND WindowHandle;
     HWND AvailableListHandle;
@@ -609,7 +609,7 @@ typedef struct _CUSTOMIZE_CONTEXT
 
 HICON CustomizeGetToolbarIcon(
     _In_ PCUSTOMIZE_CONTEXT Context,
-    _In_ INT CommandID,
+    _In_ LONG CommandID,
     _In_ LONG DpiValue
     );
 

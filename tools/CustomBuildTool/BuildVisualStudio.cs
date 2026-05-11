@@ -93,7 +93,7 @@ namespace CustomBuildTool
                                 enumSetupInstances->Release(EnumSetupInstancesInterfacePtr);
                             }
 
-                            setupConfiguration->Release(SetupConfigurationInterfacePtr);
+                            setupConfiguration->Release(SetupConfiguration2InterfacePtr);
                         }
 
                         setupInterface->Release(SetupConfigurationInterfacePtr);
@@ -103,23 +103,24 @@ namespace CustomBuildTool
                 NativeLibrary.Free(baseAddress);
             }
 
-            // ESDK Begin
-            if (Win32.GetEnvironmentVariable("EWDK_ROOT", out string ewdkRoot))
+            // Environment Begin
+            bool isEnterpriseWdk = IsEnterpriseWdk();
+            string environmentVersion = EnvironmentVersion();
+
+            if (Win32.GetEnvironmentVariable("VSINSTALLDIR", out string vsInstallDir) && Directory.Exists(vsInstallDir))
             {
-                if (Directory.Exists(ewdkRoot))
-                {
-                    VisualStudioInstanceList.Add(new VisualStudioInstance("Enterprise WDK", ewdkRoot, "17.0"));
-                }
+                VisualStudioInstanceList.Add(new VisualStudioInstance(isEnterpriseWdk ? "Enterprise WDK" : "Visual Studio (Environment)", vsInstallDir, environmentVersion));
             }
             else if (Win32.GetEnvironmentVariable("VCINSTALLDIR", out string vcInstallDir))
             {
-                string vsPath = Path.GetFullPath(Path.Combine(vcInstallDir, "..\\..\\"));
+                string vsPath = Path.GetFullPath(Path.Join([vcInstallDir, "..\\..\\"]));
+
                 if (Directory.Exists(vsPath))
                 {
-                    VisualStudioInstanceList.Add(new VisualStudioInstance("Visual Studio (Environment)", vsPath, "17.0"));
+                    VisualStudioInstanceList.Add(new VisualStudioInstance(isEnterpriseWdk ? "Enterprise WDK" : "Visual Studio (Environment)", vsPath, environmentVersion));
                 }
             }
-            // ESDK End
+            // Environment End
 
             VisualStudioInstanceList.Sort((p1, p2) =>
             {
@@ -135,6 +136,35 @@ namespace CustomBuildTool
 
                 return 1;
             });
+        }
+
+        public static bool IsEnterpriseWdk()
+        {
+            if (Win32.GetEnvironmentVariable("EnterpriseWDK", out string enterpriseWdk))
+            {
+                if (enterpriseWdk.Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public static string EnvironmentVersion()
+        {
+            string environmentVersion = "17.0";
+
+            if (Win32.GetEnvironmentVariable("EWDKVisualStudioVersion", out string ewdkVisualStudioVersion) && !string.IsNullOrWhiteSpace(ewdkVisualStudioVersion))
+            {
+                environmentVersion = ewdkVisualStudioVersion.Trim();
+            }
+            else if (Win32.GetEnvironmentVariable("VisualStudioVersion", out string visualStudioVersion) && !string.IsNullOrWhiteSpace(visualStudioVersion))
+            {
+                environmentVersion = visualStudioVersion.Trim();
+            }
+
+            return environmentVersion;
         }
 
         /// <summary>
@@ -180,46 +210,60 @@ namespace CustomBuildTool
         //private static readonly Guid IID_ISetupPackageReference = new Guid("DA8D8A16-B2B6-4487-A2F1-594CCCCD6BF5");
         //private static readonly Guid IID_ISetupHelper = new Guid("42B21B78-6192-463E-87BF-D577838F1D5C");
 
-        /// <summary>
-        /// Gets the path to the native Visual Studio setup configuration library based on process architecture.
-        /// </summary>
-        /// <returns>
-        /// The full path to the setup configuration native DLL.
-        /// </returns>
         private static string GetLibraryPath()
         {
-            string path;
+            string path = null;
 
-            // HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{177F0C4A-1CD3-4DE7-A32C-71DBBB9FA36D}\InprocServer32
-            if (Environment.Is64BitProcess)
-                path = "C:\\ProgramData\\Microsoft\\VisualStudio\\Setup\\x64\\Microsoft.VisualStudio.Setup.Configuration.Native.dll";
-            else
-                path = "C:\\ProgramData\\Microsoft\\VisualStudio\\Setup\\x86\\Microsoft.VisualStudio.Setup.Configuration.Native.dll";
-
-            if (!File.Exists(path))
+            if (Win32.GetEnvironmentVariable("ProgramData", out string programData))
             {
-                if (Environment.Is64BitProcess)
-                    path = "C:\\ProgramData\\Microsoft\\VisualStudio\\Setup\\x64\\Microsoft.VisualStudio.Setup.Configuration.NativeMethods.dll";
-                else
-                    path = "C:\\ProgramData\\Microsoft\\VisualStudio\\Setup\\x86\\Microsoft.VisualStudio.Setup.Configuration.NativeMethods.dll";
+                string directory = Environment.Is64BitProcess ? "x64" : "x86";
+
+                path = Path.Join([programData, @"\Microsoft\VisualStudio\Setup\", directory, @"\Microsoft.VisualStudio.Setup.Configuration.Native.dll"]);
             }
 
+            //if (!File.Exists(path))
+            //{
+            //    string directory = Environment.Is64BitProcess ? "x64" : "x86";
+            //    path = Path.Join([programData, @"\Microsoft\VisualStudio\Setup\", directory, @"\Microsoft.VisualStudio.Setup.Configuration.NativeMethods.dll"]);
+            //}
+
             return path;
+        }
+
+        internal static unsafe string BStrToStringAndFree(IntPtr Value)
+        {
+            if (Value == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                uint byteLength = *(uint*)((byte*)Value - sizeof(uint));
+
+                if (byteLength == 0)
+                    return string.Empty;
+
+                ReadOnlySpan<char> valueSpan = new ReadOnlySpan<char>((char*)Value, (int)(byteLength / sizeof(char)));
+                return valueSpan.ToString();
+            }
+            finally
+            {
+                Marshal.FreeBSTR(Value);
+            }
         }
 
         /// <summary>
         /// Required workloads for Visual Studio.
         /// </summary>
-        private static readonly string[] RequiredWorkloads =
-        [
+        private static readonly FrozenSet<string> RequiredWorkloads = new[]
+        {
             "Microsoft.VisualStudio.Workload.NativeDesktop"
-        ];
+        }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Required components for Visual Studio.
         /// </summary>
-        private static readonly string[] RequiredComponents =
-        [
+        private static readonly FrozenSet<string> RequiredComponents = new[]
+        {
             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
             "Microsoft.VisualStudio.Component.Windows11SDK.26100",
@@ -234,107 +278,60 @@ namespace CustomBuildTool
             "Microsoft.VisualStudio.Component.VC.Runtimes.ARM64EC.Spectre",
             "Microsoft.VisualStudio.Component.NuGet",
             "Microsoft.VisualStudio.Component.Git"
-        ];
+        }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Recommended components for Visual Studio.
         /// </summary>
-        private static readonly string[] RecommendedComponents =
-        [
+        private static readonly FrozenSet<string> RecommendedComponents = new[]
+        {
             "Microsoft.VisualStudio.Component.VC.CMake.Project",
             "Microsoft.VisualStudio.Component.VC.14.45.17.12.CLI.Support"
-        ];
+        }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Checks whether all required build dependencies are installed and available on the system.
         /// </summary>
-        /// <remarks>This method verifies the presence of Visual Studio, Windows SDK, Git, and .NET. It
-        /// can be used to ensure the environment is ready for building projects. When <paramref name="quiet"/> is <see
-        /// langword="false"/>, informative messages are printed to the console for each dependency.</remarks>
-        /// <param name="quiet">If <see langword="true"/>, suppresses output messages; otherwise, displays status information for each
-        /// dependency check.</param>
-        /// <returns>A value indicating whether all required build dependencies are present. <see langword="true"/> if all
-        /// dependencies are found; otherwise, <see langword="false"/>.</returns>
+        /// <param name="quiet">Specifies whether to suppress console output during the check.</param>
+        /// <returns>
+        /// <c>true</c> if all dependencies are found; otherwise, <c>false</c>.
+        /// </returns>
         public static bool CheckBuildDependencies(bool quiet = false)
         {
-            var result = true;
-            var instance = BuildVisualStudio.GetVisualStudioInstance();
+            bool result = true;
 
-            if (!quiet)
-            {
-                Program.PrintColorMessage("Checking Build Dependencies...\n", ConsoleColor.Cyan);
-            }
-
-            if (instance == null)
-            {
-                if (!quiet)
-                {
-                    Program.PrintColorMessage("\u274C - Visual Studio 2022/2026 - Not found", ConsoleColor.Red);
-                }
-                result = false;
-            }
-            else
-            {
-                if (!quiet)
-                {
-                    Program.PrintColorMessage($"\u2705 - {instance.DisplayName} ({instance.InstallationVersion})", ConsoleColor.Green);
-                }
-
-                if (instance.Packages.Count > 0)
-                {
-                    var missingWorkloads = RequiredWorkloads.Where(w => !instance.Packages.Any(p => p.Id.Equals(w, StringComparison.OrdinalIgnoreCase))).ToList();
-                    var missingComponents = RequiredComponents.Where(c => !instance.Packages.Any(p => p.Id.Equals(c, StringComparison.OrdinalIgnoreCase))).ToList();
-
-                    if (missingWorkloads.Count > 0 || missingComponents.Count > 0)
-                    {
-                        result = false;
-                        if (!quiet)
-                        {
-                            Program.PrintColorMessage("Visual Studio missing components:", ConsoleColor.Yellow);
-                            foreach (var w in missingWorkloads)
-                                Program.PrintColorMessage($"   - Workload: {w}", ConsoleColor.Gray);
-                            foreach (var c in missingComponents)
-                                Program.PrintColorMessage($"   - Component: {c}", ConsoleColor.Gray);
-                        }
-                    }
-                }
-            }
-
-            // Windows SDK check
-            string sdkVersion = Utils.GetWindowsSdkVersion();
-            if (string.IsNullOrWhiteSpace(sdkVersion))
-            {
-                if (!quiet)
-                    Program.PrintColorMessage("\u274C - Windows SDK - Not found", ConsoleColor.Red);
-                result = false;
-            }
-            else
-            {
-                if (!quiet)
-                    Program.PrintColorMessage($"\u2705 - Windows SDK - {sdkVersion}", ConsoleColor.Green);
-            }
-
-            // Git check
-            string gitPath = Utils.GetGitFilePath();
-            if (string.IsNullOrWhiteSpace(gitPath))
-            {
-                if (!quiet)
-                    Program.PrintColorMessage("\u274C - Git - Not found", ConsoleColor.Yellow);
-            }
-            else
-            {
-                if (!quiet)
-                    Program.PrintColorMessage("\u2705 - Git", ConsoleColor.Green);
-            }
-
-            // .NET check
             try
             {
-                Win32.CreateProcess("dotnet.exe", "--version", out string dotnetVersion, false, true);
-                if (!string.IsNullOrWhiteSpace(dotnetVersion))
+                if (GetVisualStudioInstance() != null)
                 {
                     if (!quiet)
-                        Program.PrintColorMessage($"\u2705 - DotNET - {dotnetVersion.Trim()}", ConsoleColor.Green);
+                        Program.PrintColorMessage($"\u2705 - {VisualStudioInstance.DisplayName} - {VisualStudioInstance.InstallationVersion}", ConsoleColor.Green);
+                }
+                else
+                {
+                    result = false;
+                    if (!quiet)
+                        Program.PrintColorMessage("\u274C - Visual Studio - Not found", ConsoleColor.Yellow);
+                }
+
+                if (Win32.IsGitInstalled())
+                {
+                    if (!quiet)
+                        Program.PrintColorMessage("\u2705 - Git - Installed", ConsoleColor.Green);
+                }
+                else
+                {
+                    result = false;
+                    if (!quiet)
+                        Program.PrintColorMessage("\u274C - Git - Not found", ConsoleColor.Yellow);
+                }
+
+                string dotnet = Win32.GetDotNetPath();
+                if (!string.IsNullOrWhiteSpace(dotnet))
+                {
+                    string version = Win32.GetDotNetVersion();
+                    if (!quiet)
+                        Program.PrintColorMessage($"\u2705 - DotNET - {version.Trim()}", ConsoleColor.Green);
                 }
                 else
                 {
@@ -428,10 +425,9 @@ namespace CustomBuildTool
             args.Add("--add");
             args.Add("Microsoft.NetCore.Component.Runtime.10.0");
 
-            string commandLine = string.Join(" ", args.Select(a => a.Contains(' ', StringComparison.OrdinalIgnoreCase) ? $"\"{a}\"" : a));
-            Program.PrintColorMessage($"Installing Visual Studio components... {commandLine}", ConsoleColor.Cyan);
+            Program.PrintColorMessage($"Installing Visual Studio components... {string.Join(' ', args)}", ConsoleColor.Cyan);
 
-            int exitCode = Win32.CreateProcess(installerPath, commandLine, out _, false, false);
+            int exitCode = Win32.CreateProcess(installerPath, args, out _, false, false);
 
             if (exitCode == 0 || exitCode == 3010)
             {
@@ -444,7 +440,7 @@ namespace CustomBuildTool
             {
                 if (exitCode == 8006)
                 {
-                    Program.PrintColorMessage($"The Visual Studio installation failed because it attempted to install or modify workloads while Visual Studio (or related processes) are open.", ConsoleColor.Red);
+                    Program.PrintColorMessage("The Visual Studio installation failed because it attempted to install or modify workloads while Visual Studio (or related processes) are open.", ConsoleColor.Red);
                 }
                 else
                 {
@@ -545,7 +541,50 @@ namespace CustomBuildTool
             this.Path = Path;
             this.InstallationVersion = Version;
             this.Packages = new List<VisualStudioPackage>();
-            this.HasARM64BuildToolsComponents = true; // Assume true for manual/ESDK instances
+            this.HasARM64BuildToolsComponents = ProbeArm64BuildTools(Path);
+        }
+
+        /// <summary>
+        /// Probes whether ARM64-targeting cl.exe is available beneath a manual/ESDK instance path.
+        /// EWDK exposes the launched arch via the Platform env var; honor it directly to avoid a
+        /// directory enumeration on every cold start.
+        /// </summary>
+        private static bool ProbeArm64BuildTools(string installPath)
+        {
+            if (BuildVisualStudio.IsEnterpriseWdk())
+            {
+                if (Win32.GetEnvironmentVariable("Platform", out string platform) &&
+                    platform.Equals("arm64", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(installPath))
+                return false;
+
+            string msvcRoot = System.IO.Path.Combine(installPath, @"VC\Tools\MSVC");
+            if (!Directory.Exists(msvcRoot))
+                return false;
+
+            try
+            {
+                foreach (string clPath in Directory.EnumerateFiles(msvcRoot, "cl.exe", SearchOption.AllDirectories))
+                {
+                    if (clPath.Contains(@"\Hostarm64\arm64\", StringComparison.OrdinalIgnoreCase) ||
+                        clPath.Contains(@"\Hostx64\arm64\", StringComparison.OrdinalIgnoreCase) ||
+                        clPath.Contains(@"\Hostx86\arm64\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -570,22 +609,22 @@ namespace CustomBuildTool
 
             if (FromInstance->GetInstallationName(SetupInstancePtr, &NamePtr).Succeeded && NamePtr != IntPtr.Zero)
             {
-                this.Name = Marshal.PtrToStringBSTR(NamePtr);
+                this.Name = BuildVisualStudio.BStrToStringAndFree(NamePtr);
             }
 
             if (FromInstance->GetInstallationPath(SetupInstancePtr, &PathPtr).Succeeded && PathPtr != IntPtr.Zero)
             {
-                this.Path = Marshal.PtrToStringBSTR(PathPtr);
+                this.Path = BuildVisualStudio.BStrToStringAndFree(PathPtr);
             }
 
             if (FromInstance->GetInstallationVersion(SetupInstancePtr, &VersionPtr).Succeeded && VersionPtr != IntPtr.Zero)
             {
-                this.InstallationVersion = Marshal.PtrToStringBSTR(VersionPtr);
+                this.InstallationVersion = BuildVisualStudio.BStrToStringAndFree(VersionPtr);
             }
 
             if (FromInstance->GetDisplayName(SetupInstancePtr, 0, &DisplayNamePtr).Succeeded && DisplayNamePtr != IntPtr.Zero)
             {
-                this.DisplayName = Marshal.PtrToStringBSTR(DisplayNamePtr);
+                this.DisplayName = BuildVisualStudio.BStrToStringAndFree(DisplayNamePtr);
             }
 
             if (FromInstance->GetState(SetupInstancePtr, &SetupPackageState).Succeeded)
@@ -597,26 +636,35 @@ namespace CustomBuildTool
 
             if (FromInstance->GetPackages(SetupInstancePtr, &SetupPackagesArrayPtr).Succeeded)
             {
-                if (PInvoke.SafeArrayGetLBound(SetupPackagesArrayPtr, 1, out var lbound).Succeeded &&
-                    PInvoke.SafeArrayGetUBound(SetupPackagesArrayPtr, 1, out var ubound).Succeeded)
+                try
                 {
-                    var count = ubound - lbound + 1;
-
-                    for (int i = 0; i < count; i++)
+                    if (PInvoke.SafeArrayGetLBound(SetupPackagesArrayPtr, 1, out var lbound).Succeeded &&
+                        PInvoke.SafeArrayGetUBound(SetupPackagesArrayPtr, 1, out var ubound).Succeeded)
                     {
-                        if (PInvoke.SafeArrayGetElement(
-                            SetupPackagesArrayPtr,
-                            &i,
-                            &SetupPackagePtr
-                            ).Succeeded)
+                        var count = ubound - lbound + 1;
+
+                        for (int i = 0; i < count; i++)
                         {
-                            var package = *(ISetupPackageReferenceVTable**)SetupPackagePtr;
+                            int index = lbound + i;
 
-                            this.Packages.Add(new VisualStudioPackage(package, SetupPackagePtr));
+                            if (PInvoke.SafeArrayGetElement(
+                                SetupPackagesArrayPtr,
+                                &index,
+                                &SetupPackagePtr
+                                ).Succeeded)
+                            {
+                                var package = *(ISetupPackageReferenceVTable**)SetupPackagePtr;
 
-                            package->Release(SetupPackagePtr);
+                                this.Packages.Add(new VisualStudioPackage(package, SetupPackagePtr));
+
+                                package->Release(SetupPackagePtr);
+                            }
                         }
                     }
+                }
+                finally
+                {
+                    PInvoke.SafeArrayDestroy(SetupPackagesArrayPtr);
                 }
             }
 
@@ -669,18 +717,15 @@ namespace CustomBuildTool
         //
         //    foreach (var sdk in found)
         //    {
-        //        string[] tokens = sdk.Id.Split(".", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        //
-        //        foreach (string name in tokens)
+        //        foreach (var name in sdk.Id.AsSpan().Split('.'))
         //        {
-        //            if (uint.TryParse(name, out uint version))
+        //            if (uint.TryParse(sdk.Id.AsSpan(name), out uint version))
         //            {
-        //                versions.Add(name);
+        //                versions.Add(sdk.Id.AsSpan(name).ToString());
         //                break;
         //            }
         //        }
-        //    }
-        //
+        //    }        //
         //    versions.Sort((p1, p2) =>
         //    {
         //        if (Version.TryParse(p1, out Version v1) && Version.TryParse(p2, out Version v2))
@@ -711,6 +756,71 @@ namespace CustomBuildTool
             VisualStudioPackage package = GetLatestSdkPackage();
 
             return package == null ? string.Empty : package.Version;
+        }
+
+        /// <summary>
+        /// Gets the Enterprise WDK version from version.txt or Visual Studio metadata.
+        /// </summary>
+        /// <returns>
+        /// The version string, or <c>string.Empty</c> if it cannot be determined.
+        /// </returns>
+        public string GetProductVersion()
+        {
+            try
+            {
+                if (BuildVisualStudio.IsEnterpriseWdk())
+                {
+                    // EWDK's version.txt sits at the extraction root, not the drive root.
+                    // Walk up from VSINSTALLDIR until version.txt is found.
+                    string dir = this.Path;
+
+                    while (!string.IsNullOrEmpty(dir))
+                    {
+                        string versionFilePath = System.IO.Path.Combine(dir, "version.txt");
+
+                        if (File.Exists(versionFilePath))
+                        {
+                            string versionText = File.ReadAllText(versionFilePath).Trim();
+
+                            if (!string.IsNullOrWhiteSpace(versionText))
+                            {
+                                if (versionText.StartsWith("Version ", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    versionText = versionText.Substring("Version ".Length);
+                                }
+                                return versionText;
+                            }
+                        }
+
+                        string parent = System.IO.Path.GetDirectoryName(dir);
+                        if (string.IsNullOrEmpty(parent) || parent.Equals(dir, StringComparison.OrdinalIgnoreCase))
+                            break;
+                        dir = parent;
+                    }
+                }
+
+                string devenvPath = System.IO.Path.Combine(this.Path, "Common7\\IDE\\devenv.exe");
+
+                if (File.Exists(devenvPath))
+                {
+                    FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(devenvPath);
+                    return versionInfo.ProductVersion ?? string.Empty;
+                }
+
+                string msbuildPath = System.IO.Path.Combine(this.Path, "MSBuild\\Current\\Bin\\amd64\\MSBuild.exe");
+
+                if (File.Exists(msbuildPath))
+                {
+                    FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(msbuildPath);
+                    return versionInfo.ProductVersion ?? string.Empty;
+                }
+            }
+            catch
+            {
+
+            }
+
+            return string.Empty;
         }
 
         //public bool HasRequiredDependency
@@ -832,12 +942,12 @@ namespace CustomBuildTool
 
             if (FromInstance->GetId(SetupInstancePtr, &IdPtr).Succeeded && IdPtr != IntPtr.Zero)
             {
-                this.Id = Marshal.PtrToStringBSTR(IdPtr);
+                this.Id = BuildVisualStudio.BStrToStringAndFree(IdPtr);
             }
 
             if (FromInstance->GetVersion(SetupInstancePtr, &VersionPtr).Succeeded && VersionPtr != IntPtr.Zero)
             {
-                this.Version = Marshal.PtrToStringBSTR(VersionPtr);
+                this.Version = BuildVisualStudio.BStrToStringAndFree(VersionPtr);
             }
         }
 

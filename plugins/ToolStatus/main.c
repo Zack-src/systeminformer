@@ -1386,8 +1386,9 @@ LRESULT CALLBACK MainWindowCallbackProc(
                         if (processNode = PhFindProcessNode(clientId.UniqueProcess))
                         {
                             SystemInformer_SelectTabPage(0);
-                            SystemInformer_SelectProcessNode(processNode);
-                            SystemInformer_ToggleVisible(FALSE);
+                            //SystemInformer_SelectProcessNode(processNode);
+                            //SystemInformer_ToggleVisible(FALSE);
+                            PhSelectAndEnsureVisibleProcessNode(processNode);
                         }
 
                         switch (TargetingMode)
@@ -1932,7 +1933,7 @@ LOGICAL DllMain(
                 { StringSettingType, SETTING_NAME_TOOLBAR_CONFIG, L"" },
                 { StringSettingType, SETTING_NAME_STATUSBAR_CONFIG, L"" },
                 { StringSettingType, SETTING_NAME_TOOLBAR_GRAPH_CONFIG, L"" },
-                { IntegerSettingType, SETTING_NAME_RESTOREROWAFTERSEARCH, L"0" },
+                { IntegerSettingType, SETTING_NAME_RESTOREROWAFTERSEARCH, L"1" },
             };
 
             WPP_INIT_TRACING(PLUGIN_NAME);

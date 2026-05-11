@@ -458,16 +458,8 @@ static VOID PhpAddSessionsToComboBox(
         {
             PPH_STRING menuString;
             WINSTATIONINFORMATION winStationInfo;
-            ULONG returnLength;
 
-            if (!WinStationQueryInformationW(
-                WINSTATION_CURRENT_SERVER,
-                sessions[i].SessionId,
-                WinStationInformation,
-                &winStationInfo,
-                sizeof(WINSTATIONINFORMATION),
-                &returnLength
-                ))
+            if (!NT_SUCCESS(PhGetWindowStationSessionInformation(sessions[i].SessionId, &winStationInfo)))
             {
                 winStationInfo.Domain[0] = UNICODE_NULL;
                 winStationInfo.UserName[0] = UNICODE_NULL;
@@ -844,19 +836,14 @@ ULONG PhRunAsGetLogonId(
     VOID
     )
 {
-    ULONG returnLength;
     WINSTATIONINFORMATION stationInfo;
 
     // LsaGetLogonSessionData or TokenLogonSid
 
-    if (WinStationQueryInformationW(
-        WINSTATION_CURRENT_SERVER,
+    if (NT_SUCCESS(PhGetWindowStationSessionInformation(
         WINSTATION_CURRENT_SESSION,
-        WinStationInformation,
-        &stationInfo,
-        sizeof(WINSTATIONINFORMATION),
-        &returnLength
-        ))
+        &stationInfo
+        )))
     {
         return stationInfo.LogonId;
     }
@@ -889,16 +876,8 @@ BOOLEAN PhRunAsGetLogonSid(
     if (NT_SUCCESS(PhGetProcessSessionId(ProcessHandle, &sessionId)))
     {
         WINSTATIONINFORMATION winStationInfo;
-        ULONG returnLength;
 
-        if (WinStationQueryInformationW(
-            WINSTATION_CURRENT_SERVER,
-            sessionId,
-            WinStationInformation,
-            &winStationInfo,
-            sizeof(WINSTATIONINFORMATION),
-            &returnLength
-            ) && winStationInfo.UserName[0] != UNICODE_NULL)
+        if (NT_SUCCESS(PhGetWindowStationSessionInformation(sessionId, &winStationInfo)))
         {
             PPH_STRING fullUserName;
 
@@ -1177,7 +1156,7 @@ NTSTATUS PhRunAsExecuteParentCommand(
 
             PhConsoleSetForeground(newProcessHandle, TRUE);
 
-            NtResumeProcess(newProcessHandle);
+            PhResumeProcess(newProcessHandle);
         }
     }
 
@@ -1425,7 +1404,7 @@ VOID PhRunAsExecuteCommmand(
 
                 PhConsoleSetForeground(newProcessHandle, TRUE);
 
-                NtResumeProcess(newProcessHandle);
+                PhResumeProcess(newProcessHandle);
             }
 
             NtClose(newProcessHandle);
@@ -1842,7 +1821,7 @@ NTSTATUS PhRunAsUpdateDesktop(
 
             if (NT_SUCCESS(status))
             {
-                assert(RtlValidSecurityDescriptor(&newSecurityDescriptor));
+                assert(PhValidSecurityDescriptor(&newSecurityDescriptor));
 
                 status = PhSetObjectSecurity(desktopHandle, DACL_SECURITY_INFORMATION, &newSecurityDescriptor);
             }
@@ -2015,7 +1994,7 @@ NTSTATUS PhRunAsUpdateWindowStation(
 
             if (NT_SUCCESS(status))
             {
-                assert(RtlValidSecurityDescriptor(&newSecurityDescriptor));
+                assert(PhValidSecurityDescriptor(&newSecurityDescriptor));
 
                 status = PhSetObjectSecurity(wsHandle, DACL_SECURITY_INFORMATION, &newSecurityDescriptor);
             }
@@ -2124,7 +2103,7 @@ NTSTATUS PhRunAsUpdateWindowStation(
 //#ifdef DEBUG
 //    assert(RtlValidSecurityDescriptor(securityDescriptor));
 //    assert(allocationLength < sizeof(securityDescriptorBuffer));
-//    assert(RtlLengthSecurityDescriptor(securityDescriptor) < sizeof(securityDescriptorBuffer));
+//    assert(PhLengthSecurityDescriptor(securityDescriptor) < sizeof(securityDescriptorBuffer));
 //#endif
 //
 //    return STATUS_SUCCESS;

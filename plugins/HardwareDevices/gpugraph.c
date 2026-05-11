@@ -34,14 +34,14 @@ PPH_STRING GraphicsDeviceGetAdapterDescription(
 
     if (NT_SUCCESS(GraphicsOpenAdapterFromDeviceName(&adapterHandle, NULL, PhGetString(DevicePath))))
     {
-        GX_ADAPTER_ATTRIBUTES adapterSttributes;
+        GX_ADAPTER_ATTRIBUTES adapterAttributes;
 
         if (NT_SUCCESS(GraphicsQueryAdapterAttributes(
             adapterHandle,
-            &adapterSttributes
+            &adapterAttributes
             )))
         {
-            npuDevice = !!adapterSttributes.TypeNpu;
+            npuDevice = !!adapterAttributes.TypeNpu;
         }
 
         GraphicsCloseAdapterHandle(adapterHandle);
@@ -278,7 +278,7 @@ VOID GraphicsDeviceLayoutGraphs(
         Context->FanRpmGraphState.TooltipIndex = ULONG_MAX;
     }
 
-    marginRect = Context->GraphMargin;
+    marginRect = Context->GpuGraphMargin;
     PhGetMarginDpiValue(&marginRect, Context->SysinfoSection->Parameters->WindowDpi, TRUE);
 
     PhGetClientRect(Context->GpuDialog, &clientRect);

@@ -67,12 +67,17 @@ static PPH_STRING ScanRateLimitedString = NULL;
 static PPH_STRING ScanUnknownString = NULL;
 static PPH_STRING ScanFileTooLarge = NULL;
 static PPH_STRING ScanSubmittingString = NULL;
-static const LONG64 ScanOKExpMin = (10LL * 24 * 60 * 60 * 10000000); // 10 days
-static const LONG64 ScanOKExpMax = (14LL * 24 * 60 * 60 * 10000000); // 14 days
-static const LONG64 ScanRateLmtExpMin = (15LL * 60 * 10000000); // 15 minutes
-static const LONG64 ScanRateLmtExpMax = (60LL * 60 * 10000000); // 1 hour
-static const LONG64 ScanNoResponseExpMin = (1LL * 24 * 60 * 60 * 10000000); // 1 day
-static const LONG64 ScanNoResponseExpMax = (2LL * 24 * 60 * 60 * 10000000); // 2 days
+static const LONG64 ScanOKExpMin = (21LL * 24 * 60 * 60 * 10000000); // 21 days
+static const LONG64 ScanOKExpMax = (30LL * 24 * 60 * 60 * 10000000); // 30 days
+static const LONG64 ScanRateLmtExpMin = (4LL * 60 * 60 * 10000000); // 4 hours
+static const LONG64 ScanRateLmtExpMax = (12LL * 60 * 60 * 10000000); // 12 hours
+static const LONG64 ScanRateLmtJitterMax = (60LL * 60 * 10000000); // 1 hour
+static const LONG64 ScanNoResponseExpMin = (5LL * 24 * 60 * 60 * 10000000); // 5 days
+static const LONG64 ScanNoResponseExpMax = (7LL * 24 * 60 * 60 * 10000000); // 7 days
+static LONG ScanVirusTotalUnauthorized = 0;
+static LONG ScanHybridAnalysisUnauthorized = 0;
+static LONG64 ScanVirusTotalRateLimitedUntil = 0;
+static LONG64 ScanHybridAnalysisRateLimitedUntil = 0;
 
 static typeof(&BCryptOpenAlgorithmProvider) BCryptOpenAlgorithmProvider_I = NULL;
 static typeof(&BCryptCloseAlgorithmProvider) BCryptCloseAlgorithmProvider_I = NULL;
@@ -272,6 +277,21 @@ LONG64 MakeExpiry(
     return expiry;
 }
 
+VOID AdvanceRateLimitCutoff(
+    _Inout_ PLONG64 Target,
+    _In_ LONG64 New
+    )
+{
+    LONG64 prev;
+
+    do
+    {
+        prev = ReadNoFence64(Target);
+        if (prev >= New)
+            return;
+    } while (InterlockedCompareExchange64(Target, New, prev) != prev);
+}
+
 VOID SetScanResult(
     _In_ PSCAN_ITEM Item,
     _In_ PPH_STRING Result
@@ -375,6 +395,7 @@ VOID ProcessVirusTotal(
     ULONG64 malicious;
     ULONG64 undetected;
     PVIRUSTOTAL_FILE_REPORT report = NULL;
+    LARGE_INTEGER limitedUntil;
 
     PhQuerySystemTime(&systemTime);
 
@@ -406,12 +427,28 @@ VOID ProcessVirusTotal(
     if (FlagOn(Item->Flags, SCAN_FLAG_LOCAL_ONLY))
         goto CleanupExit;
 
-    if (!NT_SUCCESS(VirusTotalRequestFileReport(Item->FileHash->Sha256, ScanVirusTotalPAT, &report)))
-        goto CleanupExit;
-
-    if (report->HttpStatus == 200) // OK
+    if (ReadAcquire(&ScanVirusTotalUnauthorized))
     {
+        WriteNoFence64(&Item->Expiry.QuadPart, LONG64_MAX);
+        SetScanResult(Item, PhReferenceObject(ScanUnauthorizedString));
+        goto CleanupExit;
+    }
+
+    limitedUntil.QuadPart = ReadNoFence64(&ScanVirusTotalRateLimitedUntil);
+    if (limitedUntil.QuadPart > systemTime.QuadPart && !FlagOn(Item->Flags, SCAN_FLAG_RESCAN))
+    {
+        httpStatus = 429;
+    }
+    else
+    {
+        if (!NT_SUCCESS(VirusTotalRequestFileReport(Item->FileHash->Sha256, ScanVirusTotalPAT, &report)))
+            goto CleanupExit;
+
         httpStatus = report->HttpStatus;
+    }
+
+    if (httpStatus == 200) // OK
+    {
         malicious = report->Malicious;
         undetected = report->Undetected;
         expiry.QuadPart = MakeExpiry(&systemTime, ScanOKExpMin, ScanOKExpMax);
@@ -427,25 +464,34 @@ VOID ProcessVirusTotal(
             undetected
             );
     }
-    else if (report->HttpStatus == 429) // Too many requests
+    else if (httpStatus == 429) // Too many requests
     {
-        httpStatus = report->HttpStatus;
         malicious = 0;
         undetected = 0;
-        expiry.QuadPart = MakeExpiry(&systemTime, ScanRateLmtExpMin, ScanRateLmtExpMax);
+
+        if (limitedUntil.QuadPart > systemTime.QuadPart)
+        {
+            expiry.QuadPart = MakeExpiry(&limitedUntil, 0, ScanRateLmtJitterMax);
+        }
+        else
+        {
+            expiry.QuadPart = MakeExpiry(&systemTime, ScanRateLmtExpMin, ScanRateLmtExpMax);
+            AdvanceRateLimitCutoff(&ScanVirusTotalRateLimitedUntil, expiry.QuadPart);
+        }
 
         WriteNoFence64(&Item->Expiry.QuadPart, expiry.QuadPart);
         SetScanResult(Item, PhReferenceObject(ScanRateLimitedString));
 
         UpdateDBVirusTotal(Item->FileHash->Sha256, httpStatus, &expiry, malicious, undetected);
     }
-    else if (report->HttpStatus == 401 || report->HttpStatus == 403) // Unauthorized/Forbidden
+    else if (httpStatus == 401 || httpStatus == 403) // Unauthorized/Forbidden
     {
+        WriteRelease(&ScanVirusTotalUnauthorized, 1);
+        WriteNoFence64(&Item->Expiry.QuadPart, LONG64_MAX);
         SetScanResult(Item, PhReferenceObject(ScanUnauthorizedString));
     }
     else
     {
-        httpStatus = report->HttpStatus;
         malicious = 0;
         undetected = 0;
         expiry.QuadPart = MakeExpiry(&systemTime, ScanNoResponseExpMin, ScanNoResponseExpMax);
@@ -550,6 +596,7 @@ VOID ProcessHybridAnalysis(
     ULONG64 threatScore;
     PPH_STRING verdict = NULL;
     PHYBRIDANALYSIS_FILE_REPORT report = NULL;
+    LARGE_INTEGER limitedUntil;
 
     PhQuerySystemTime(&systemTime);
 
@@ -586,12 +633,28 @@ VOID ProcessHybridAnalysis(
 
     PhClearReference(&vxFamily);
 
-    if (!NT_SUCCESS(HybridAnalysisRequestFileReport(Item->FileHash->Sha256, ScanHybridAnalysisPAT, &report)))
-        goto CleanupExit;
-
-    if (report->HttpStatus == 200) // OK
+    if (ReadAcquire(&ScanHybridAnalysisUnauthorized))
     {
+        WriteNoFence64(&Item->Expiry.QuadPart, LONG64_MAX);
+        SetScanResult(Item, PhReferenceObject(ScanUnauthorizedString));
+        goto CleanupExit;
+    }
+
+    limitedUntil.QuadPart = ReadNoFence64(&ScanHybridAnalysisRateLimitedUntil);
+    if (limitedUntil.QuadPart > systemTime.QuadPart && !FlagOn(Item->Flags, SCAN_FLAG_RESCAN))
+    {
+        httpStatus = 429;
+    }
+    else
+    {
+        if (!NT_SUCCESS(HybridAnalysisRequestFileReport(Item->FileHash->Sha256, ScanHybridAnalysisPAT, &report)))
+            goto CleanupExit;
+
         httpStatus = report->HttpStatus;
+    }
+
+    if (httpStatus == 200) // OK
+    {
         multiscanResult = report->MultiscanResult;
         vxFamily = PhReferenceObject(report->VxFamily);
         threatScore = report->ThreatScore;
@@ -614,14 +677,22 @@ VOID ProcessHybridAnalysis(
             verdict
             );
     }
-    else if (report->HttpStatus == 429) // Too many requests
+    else if (httpStatus == 429) // Too many requests
     {
-        httpStatus = report->HttpStatus;
         multiscanResult = 0;
         vxFamily = PhReferenceEmptyString();
         threatScore = 0;
         verdict = PhReferenceEmptyString();
-        expiry.QuadPart = MakeExpiry(&systemTime, ScanRateLmtExpMin, ScanRateLmtExpMax);
+
+        if (limitedUntil.QuadPart > systemTime.QuadPart)
+        {
+            expiry.QuadPart = MakeExpiry(&limitedUntil, 0, ScanRateLmtJitterMax);
+        }
+        else
+        {
+            expiry.QuadPart = MakeExpiry(&systemTime, ScanRateLmtExpMin, ScanRateLmtExpMax);
+            AdvanceRateLimitCutoff(&ScanHybridAnalysisRateLimitedUntil, expiry.QuadPart);
+        }
 
         WriteNoFence64(&Item->Expiry.QuadPart, expiry.QuadPart);
         SetScanResult(Item, PhReferenceObject(ScanRateLimitedString));
@@ -636,11 +707,13 @@ VOID ProcessHybridAnalysis(
             verdict
             );
     }
-    else if (report->HttpStatus == 401 || report->HttpStatus == 403) // Unauthorized/Forbidden
+    else if (httpStatus == 401 || httpStatus == 403) // Unauthorized/Forbidden
     {
+        WriteRelease(&ScanHybridAnalysisUnauthorized, 1);
+        WriteNoFence64(&Item->Expiry.QuadPart, LONG64_MAX);
         SetScanResult(Item, PhReferenceObject(ScanUnauthorizedString));
     }
-    else if (report->HttpStatus == 404 &&
+    else if (httpStatus == 404 &&
              FlagOn(Item->Flags, SCAN_FLAG_SUBMIT) &&
              !ReadAcquire8(&Item->FileHash->Submitted))
     {
@@ -651,7 +724,6 @@ VOID ProcessHybridAnalysis(
     }
     else
     {
-        httpStatus = report->HttpStatus;
         multiscanResult = 0;
         vxFamily = PhReferenceEmptyString();
         threatScore = 0;

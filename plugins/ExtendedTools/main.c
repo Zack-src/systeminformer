@@ -75,12 +75,18 @@ VOID NTAPI LoadCallback(
     _In_opt_ PVOID Context
     )
 {
+    PPH_STARTUP_PARAMETERS StartupParameters = (PPH_STARTUP_PARAMETERS)Parameter;
+
+    if (StartupParameters->PhSvc)
+        return;
+
     EtWindowsVersion = PhWindowsVersion;
     EtIsExecutingInWow64 = PhIsExecutingInWow64();
     EtSampleCount = PhGetIntegerSetting(SETTING_SAMPLE_COUNT);
 
     EtLoadSettings();
 
+    EtInitializeGraphicsAdapters();
     EtEtwStatisticsInitialization();
     EtGpuMonitorInitialization();
     EtNpuMonitorInitialization();
@@ -101,6 +107,7 @@ VOID NTAPI UnloadCallback(
 
     EtEtwStatisticsUninitialization();
     EtFramesMonitorUninitialization();
+    EtUninitializeGraphicsAdapters();
 }
 
 _Function_class_(PH_CALLBACK_FUNCTION)
@@ -552,6 +559,7 @@ VOID NTAPI ProcessItemsUpdatedCallback(
     _In_opt_ PVOID Context
     )
 {
+    PPH_PROVIDER_UPDATED_EVENT updateEvent = Parameter;
     PLIST_ENTRY listEntry;
 
     // Note: no lock is needed because we only ever modify the list on this same thread.
@@ -589,6 +597,7 @@ VOID NTAPI NetworkItemsUpdatedCallback(
     _In_opt_ PVOID Context
     )
 {
+    PPH_PROVIDER_UPDATED_EVENT updateEvent = Parameter;
     PLIST_ENTRY listEntry;
 
     // Note: no lock is needed because we only ever modify the list on this same thread.

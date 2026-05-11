@@ -268,7 +268,8 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
     _In_opt_ PVOID Context
     )
 {
-    ULONG runCount = PtrToUlong(Parameter);
+    PPH_PROVIDER_UPDATED_EVENT updateEvent = Parameter;
+    ULONG runCount = updateEvent->RunCount;
     ULONG64 maxDiskValue = 0;
     ULONG64 maxNetworkValue = 0;
     PET_PROCESS_BLOCK maxDiskBlock = NULL;
@@ -348,6 +349,8 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
         PhUpdateDelta(&block->NetworkReceiveRawDelta, block->NetworkReceiveRaw);
         PhUpdateDelta(&block->NetworkSendDelta, block->NetworkSendCount);
         PhUpdateDelta(&block->NetworkSendRawDelta, block->NetworkSendRaw);
+        PhUpdateDelta(&block->FirewallAllowDelta, block->FirewallAllowCount);
+        PhUpdateDelta(&block->FirewallBlockDelta, block->FirewallBlockCount);
 
         if (!block->HaveDiskSample)
         {
@@ -359,6 +362,8 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
             block->NetworkReceiveRawDelta.Delta = 0;
             block->NetworkSendDelta.Delta = 0;
             block->NetworkSendRawDelta.Delta = 0;
+            block->FirewallAllowDelta.Delta = 0;
+            block->FirewallBlockDelta.Delta = 0;
             block->HaveDiskSample = TRUE;
         }
 
@@ -405,6 +410,8 @@ VOID NTAPI EtEtwProcessesUpdatedCallback(
             PhAddItemCircularBuffer_ULONG64(&block->DiskWriteHistory, block->CurrentDiskWrite);
             PhAddItemCircularBuffer_ULONG64(&block->NetworkSendHistory, block->CurrentNetworkSend);
             PhAddItemCircularBuffer_ULONG64(&block->NetworkReceiveHistory, block->CurrentNetworkReceive);
+            PhAddItemCircularBuffer_ULONG64(&block->FirewallAllowHistory, block->FirewallAllowDelta.Delta);
+            PhAddItemCircularBuffer_ULONG64(&block->FirewallBlockHistory, block->FirewallBlockDelta.Delta);
         }
 
         listEntry = listEntry->Flink;
@@ -459,6 +466,7 @@ VOID NTAPI EtEtwNetworkItemsUpdatedCallback(
     _In_opt_ PVOID Context
     )
 {
+    PPH_PROVIDER_UPDATED_EVENT updateEvent = Parameter;
     PLIST_ENTRY listEntry;
 
     // ETW is flushed in the processes-updated callback above. This may cause us the network

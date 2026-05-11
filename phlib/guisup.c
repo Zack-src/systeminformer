@@ -59,7 +59,7 @@ typedef struct _PH_WINDOW_PROPERTY_CONTEXT
 HFONT PhApplicationFont = NULL;
 HFONT PhTreeWindowFont = NULL;
 HFONT PhMonospaceFont = NULL;
-LONG PhFontQuality = 0;
+LONG PhFontQuality = CLEARTYPE_QUALITY;
 
 static PH_INITONCE SharedIconCacheInitOnce = PH_INITONCE_INIT;
 static PPH_HASHTABLE SharedIconCacheHashtable;
@@ -88,6 +88,7 @@ static typeof(&GetDpiForMonitor) GetDpiForMonitor_I = NULL; // win81+
 static typeof(&GetDpiForWindow) GetDpiForWindow_I = NULL; // win10rs1+
 static typeof(&GetDpiForSystem) GetDpiForSystem_I = NULL; // win10rs1+
 //static _GetDpiForSession GetDpiForSession_I = NULL; // ordinal 2713
+static typeof(&GetSystemDpiForProcess) GetSystemDpiForProcess_I = NULL;
 static typeof(&GetSystemMetricsForDpi) GetSystemMetricsForDpi_I = NULL;
 static typeof(&SystemParametersInfoForDpi) SystemParametersInfoForDpi_I = NULL;
 static _CreateMRUList CreateMRUList_I = NULL;
@@ -165,7 +166,7 @@ VOID PhGuiSupportInitialization(
 
 /**
  * Maps a font quality setting to the corresponding GDI constant.
- * 
+ *
  * \param FontQuality The font quality setting (0-6).
  * \return The corresponding GDI font quality constant.
  */
@@ -189,10 +190,10 @@ LONG PhGetFontQualitySetting(
 
 /**
  * Creates a font with specified properties.
- * 
+ *
  * \param Name Optional pointer to the font name (typeface).
  * \param Size The desired font size in points.
- * \param Weight The font weight (e.g., FW_NORMAL, FW_BOLD). 
+ * \param Weight The font weight (e.g., FW_NORMAL, FW_BOLD).
  * \param PitchAndFamily The pitch and family of the font.
  * \param Dpi The dots per inch (DPI) value for scaling.
  * \return Handle to the created font, or NULL if creation fails.
@@ -1347,8 +1348,8 @@ LONG PhGetSystemMetrics(
     _In_opt_ LONG DpiValue
     )
 {
-    LONG dpi = (DpiValue > 0) ? DpiValue : 96; // Default to 96 DPI
-    
+    LONG dpi = (DpiValue > 0) ? DpiValue : USER_DEFAULT_SCREEN_DPI; // Default to 96 DPI
+
     if (Index < 0 || Index >= PH_SYS_METRICS_MAX_INDEX)
         goto SkipCache;
 
@@ -1358,12 +1359,12 @@ LONG PhGetSystemMetrics(
         if (PhpSystemMetricsCache[i].Dpi == dpi)
         {
             LONG value = PhpSystemMetricsCache[i].Metrics[Index];
-            if (value != 0) return value; 
-            
+            if (value != 0) return value;
+
             // Slot exists but index not yet populated
-            value = (DpiValue > 0 && GetSystemMetricsForDpi_I) ? 
+            value = (DpiValue > 0 && GetSystemMetricsForDpi_I) ?
                     GetSystemMetricsForDpi_I(Index, dpi) : GetSystemMetrics(Index);
-            
+
             PhpSystemMetricsCache[i].Metrics[Index] = value;
             return value;
         }
@@ -1394,6 +1395,39 @@ SkipCache:
         return GetSystemMetricsForDpi_I(Index, DpiValue);
 
     return GetSystemMetrics(Index);
+}
+
+/**
+ * Retrieves the system DPI for a process.
+ *
+ * \param ProcessHandle Handle to the target process.
+ * \return The return value will be dependent based upon the process passed as a parameter.
+ * If the specified process has a DPI_AWARENESS value of DPI_AWARENESS_UNAWARE, the return value will be 96.
+ * That is because the current context always assumes a DPI of 96. For any other DPI_AWARENESS value,
+ * the return value will be the actual system DPI of the given process.
+ */
+LONG PhGetSystemDpiForProcess(
+    _In_ HANDLE ProcessHandle
+    )
+{
+    static PH_INITONCE initOnce = PH_INITONCE_INIT;
+
+    if (PhBeginInitOnce(&initOnce))
+    {
+        PVOID user32Handle;
+
+        if (user32Handle = PhLoadLibrary(L"user32.dll"))
+        {
+            GetSystemDpiForProcess_I = PhGetDllBaseProcedureAddress(user32Handle, "GetSystemDpiForProcess", 0);
+        }
+
+        PhEndInitOnce(&initOnce);
+    }
+
+    if (!GetSystemDpiForProcess_I)
+        return USER_DEFAULT_SCREEN_DPI;
+
+    return GetSystemDpiForProcess_I(ProcessHandle);
 }
 
 /**
@@ -2681,6 +2715,29 @@ LRESULT CALLBACK PhDefaultPropSheetWindowProcedure(
             }
         }
         break;
+    case WM_DPICHANGED:
+        {
+            // The COMCTL32 propsheet wndproc does not reliably apply the OS-suggested rect on
+            // a cross-monitor drag — for service-properties-style propsheets this collapses the
+            // window to a near-degenerate size (~28x31 px going 144 DPI -> 96 DPI). Apply the
+            // suggested rect ourselves. (dmex)
+            PRECT CONST newRect = (PRECT)lParam;
+
+            CallWindowProc(oldWndProc, hwnd, uMsg, wParam, lParam);
+
+            SetWindowPos(
+                hwnd,
+                NULL,
+                newRect->left,
+                newRect->top,
+                newRect->right - newRect->left,
+                newRect->bottom - newRect->top,
+                SWP_NOZORDER | SWP_NOACTIVATE
+                );
+
+            return 0;
+        }
+        break;
     }
 
     return CallWindowProc(oldWndProc, hwnd, uMsg, wParam, lParam);
@@ -2969,6 +3026,44 @@ PPH_LAYOUT_ITEM PhAddLayoutItemEx(
     PhAddItemList(Manager->List, item);
 
     return item;
+}
+
+/**
+ * Adds the two layout items required to manage a tab control.
+ *
+ * This adds:
+ *  - The tab control itself with PH_ANCHOR_ALL | PH_LAYOUT_IMMEDIATE_RESIZE
+ *    so the window is resized synchronously and subsequent TabCtrl_AdjustRect
+ *    calls return the updated content rect.
+ *  - A dummy item (PH_LAYOUT_TAB_CONTROL) whose Rect tracks the tab page
+ *    client area. Use this as the ParentItem when adding child controls
+ *    that live on tab pages.
+ *
+ * Order is critical: the IMMEDIATE_RESIZE item must precede the dummy so
+ * that SetWindowPos on the tab control happens before the dummy's
+ * TabCtrl_AdjustRect query during PhLayoutManagerLayout.
+ *
+ * \param Manager Pointer to the layout manager.
+ * \param TabControlHandle Handle of the SysTabControl32 window.
+ * \param TabControlItem Optionally receives the layout item for the tab control window.
+ * \param TabPageItem Receives the dummy parent item for tab page children.
+ */
+VOID PhAddTabControlLayoutItem(
+    _Inout_ PPH_LAYOUT_MANAGER Manager,
+    _In_ HWND TabControlHandle,
+    _Out_opt_ PPH_LAYOUT_ITEM *TabControlItem,
+    _Out_ PPH_LAYOUT_ITEM *TabPageItem
+    )
+{
+    PPH_LAYOUT_ITEM tabControlItem;
+    PPH_LAYOUT_ITEM tabPageItem;
+
+    tabControlItem = PhAddLayoutItem(Manager, TabControlHandle, NULL, PH_ANCHOR_ALL | PH_LAYOUT_IMMEDIATE_RESIZE);
+    tabPageItem = PhAddLayoutItem(Manager, TabControlHandle, NULL, PH_LAYOUT_TAB_CONTROL);
+
+    if (TabControlItem)
+        *TabControlItem = tabControlItem;
+    *TabPageItem = tabPageItem;
 }
 
 /**
@@ -3757,7 +3852,7 @@ NTSTATUS PhEnumWindowsEx(
  *
  * // Enumerate all siblings of a window
  * PhEnumGetWindow(hwnd, GW_HWNDNEXT, 1000, MyCallback, context);
- * 
+ *
  * // Enumerate children
  * PhEnumGetWindow(hwnd, GW_CHILD, 1000, MyCallback, context);
  *
@@ -3801,7 +3896,7 @@ NTSTATUS PhEnumGetWindow(
 
         // Get the next window before incrementing, in case callback modifies window
         nextWindow = GetWindow(windowHandle, Command);
-        
+
         // Break if we've looped back to the start (shouldn't happen but safety check)
         if (nextWindow == StartWindow || (i > 0 && nextWindow == windowHandle))
             break;
@@ -3886,7 +3981,7 @@ NTSTATUS PhEnumChildWindows(
     //
     //    i++;
     //}
-   
+
     // Note: EnumChildWindows doesn't support GetLastError. (dmex)
     return STATUS_UNSUCCESSFUL;
 }
@@ -4329,12 +4424,12 @@ VOID PhWindowNotifyTopMostEvent(
 /**
  * Retrieves the environment variables for the specified user.
  *
- * \param Environment A pointer to the new environment block. 
+ * \param Environment A pointer to the new environment block.
  * \param TokenHandle Token to query for user environment variables.
  * If this is a primary token, the token must have TOKEN_QUERY and TOKEN_DUPLICATE access.
  * If the token is an impersonation token, it must have TOKEN_QUERY access.
  * If this parameter is NULL, the returned environment block contains system variables only.
- * \param Inherit Specifies whether to inherit variables from the current process' environment. If this value is TRUE, the process inherits the current process' environment. 
+ * \param Inherit Specifies whether to inherit variables from the current process' environment. If this value is TRUE, the process inherits the current process' environment.
  * \return A pointer to the imported procedure, or NULL if the procedure could not be imported.
  * \remarks User-specific environment variables such as %USERPROFILE% are set only when the user's profile is loaded. To load a user's profile, call the LoadUserProfile function.
  */
@@ -5490,14 +5585,22 @@ VOID PhCustomDrawTreeTimeLine(
     }
 
     // Clamp percent between 0 and 100, avoid division by zero.
-    if (createTime.QuadPart > startTime.QuadPart || startTime.QuadPart == 0)
+    if (createTime.QuadPart > startTime.QuadPart || startTime.QuadPart <= 0)
     {
         SetFlag(Flags, PH_DRAW_TIMELINE_OVERFLOW);
         percent = 100;
     }
+    else if (createTime.QuadPart <= 0)
+    {
+        percent = 0;
+    }
     else
     {
-        percent = PhMultiplyDivideSigned((LONG)createTime.QuadPart, 100, (LONG)startTime.QuadPart);
+        percent = (LONG)(
+            ((ULONG64)createTime.QuadPart * 100 + ((ULONG64)startTime.QuadPart / 2)) /
+            (ULONG64)startTime.QuadPart
+            );
+
         if (percent < 0) percent = 0;
         else if (percent > 100) percent = 100;
     }

@@ -313,7 +313,7 @@ INT_PTR CALLBACK PhSipSysInfoDialogProc(
 
                     if (section->DialogHandle)
                     {
-                        section->Callback(section, SysInfoDpiChanged, UlongToPtr(LOWORD(wParam)), 0);
+                        section->Callback(section, SysInfoDpiChanged, UlongToPtr(LOWORD(wParam)), NULL);
                     }
                 }
             }
@@ -663,7 +663,7 @@ VOID PhSipOnCommand(
             static WINDOWPLACEMENT windowLayout = { sizeof(WINDOWPLACEMENT) };
             ULONG windowStyle = PhGetWindowStyle(PhSipWindow);
 
-            if (windowStyle & WS_OVERLAPPEDWINDOW)
+            if (FlagOn(windowStyle, WS_OVERLAPPEDWINDOW))
             {
                 MONITORINFO info = { sizeof(MONITORINFO) };
 
@@ -832,7 +832,7 @@ BOOLEAN PhSipOnNotify(
 
                 if (getDrawInfo->Header.hwndFrom == section->GraphHandle)
                 {
-                    section->Callback(section, SysInfoGraphGetDrawInfo, drawInfo, 0);
+                    section->Callback(section, SysInfoGraphGetDrawInfo, drawInfo, NULL);
 
                     if (CurrentView == SysInfoSectionView)
                     {
@@ -874,7 +874,7 @@ BOOLEAN PhSipOnNotify(
                         graphGetTooltipText.Index = getTooltipText->Index;
                         PhInitializeEmptyStringRef(&graphGetTooltipText.Text);
 
-                        section->Callback(section, SysInfoGraphGetTooltipText, &graphGetTooltipText, 0);
+                        section->Callback(section, SysInfoGraphGetTooltipText, &graphGetTooltipText, NULL);
 
                         getTooltipText->Text = graphGetTooltipText.Text;
 
@@ -1053,6 +1053,41 @@ VOID PhSiNotifyChangeSettings(
     PhSipUpdateColorParameters();
 }
 
+static HFONT PhSipCreateGraphLabelFont(
+    _In_ LONG WindowDpi
+    )
+{
+    LOGFONT logFont;
+    HFONT fontHandle;
+
+    if (PhGetSystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, WindowDpi))
+    {
+        logFont.lfHeight += PhMultiplyDivideSigned(1, WindowDpi, 72);
+        fontHandle = CreateFontIndirect(&logFont);
+        if (fontHandle) return fontHandle;
+    }
+
+    return PhCreateApplicationFont(WindowDpi);
+}
+
+static VOID PhSipDeleteGraphFonts(
+    _Inout_ PPH_GRAPH_DRAW_INFO DrawInfo
+    )
+{
+    HFONT textFont = DrawInfo->CachedTextFont;
+    HFONT labelYFont = DrawInfo->CachedLabelYFont;
+
+    if (textFont)
+        DeleteFont(textFont);
+
+    if (labelYFont && labelYFont != textFont)
+        DeleteFont(labelYFont);
+
+    DrawInfo->CachedFontDpi = 0;
+    DrawInfo->CachedTextFont = NULL;
+    DrawInfo->CachedLabelYFont = NULL;
+}
+
 _Function_class_(PH_SYSINFO_COLOR_SETUP_FUNCTION)
 VOID PhSiSetColorsGraphDrawInfo(
     _Out_ PPH_GRAPH_DRAW_INFO DrawInfo,
@@ -1061,43 +1096,30 @@ VOID PhSiSetColorsGraphDrawInfo(
     _In_ LONG WindowDpi
     )
 {
-    static PH_QUEUED_LOCK lock = PH_QUEUED_LOCK_INIT;
-    static LONG lastDpi = ULONG_MAX;
-    static HFONT iconTitleFont = NULL;
-
-    // Get the appropriate fonts.
-
-    if (DrawInfo->Flags & PH_GRAPH_LABEL_MAX_Y)
+    if (DrawInfo->CachedFontDpi != WindowDpi || !DrawInfo->CachedTextFont || !DrawInfo->CachedLabelYFont)
     {
-        PhAcquireQueuedLockExclusive(&lock);
+        PhSipDeleteGraphFonts(DrawInfo);
 
-        if (lastDpi != WindowDpi)
-        {
-            LOGFONT logFont;
+        DrawInfo->CachedTextFont = PhCreateApplicationFont(WindowDpi);
+        DrawInfo->CachedLabelYFont = PhSipCreateGraphLabelFont(WindowDpi);
 
-            if (PhGetSystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(LOGFONT), &logFont, WindowDpi))
-            {
-                logFont.lfHeight += PhMultiplyDivide(1, WindowDpi, 72);
+        if (!DrawInfo->CachedTextFont)
+            DrawInfo->CachedTextFont = DrawInfo->CachedLabelYFont;
 
-                HFONT fontHandle = iconTitleFont;
-                iconTitleFont = CreateFontIndirect(&logFont);
-                if (fontHandle) DeleteFont(fontHandle);
-            }
+        if (!DrawInfo->CachedLabelYFont)
+            DrawInfo->CachedLabelYFont = DrawInfo->CachedTextFont;
 
-            if (!iconTitleFont)
-            {
-                iconTitleFont = PhCreateApplicationFont(WindowDpi);
-            }
-
-            lastDpi = WindowDpi;
-        }
-
-        DrawInfo->LabelYFont = iconTitleFont;
-
-        PhReleaseQueuedLockExclusive(&lock);
+        DrawInfo->CachedFontDpi = WindowDpi;
     }
 
-    DrawInfo->TextFont = PhApplicationFont;
+    // Cache per-graph fonts so one window's DPI does not replace another's handles.
+
+    if (FlagOn(DrawInfo->Flags, PH_GRAPH_LABEL_MAX_Y))
+        DrawInfo->LabelYFont = DrawInfo->CachedLabelYFont;
+    else
+        DrawInfo->LabelYFont = NULL;
+
+    DrawInfo->TextFont = DrawInfo->CachedTextFont;
 
     // Set up the colors.
 
@@ -1253,10 +1275,10 @@ VOID PhSipInitializeParameters(
 
     hdc = GetDC(PhSipWindow);
 
-    logFont.lfHeight -= PhMultiplyDivide(3, CurrentParameters.WindowDpi, 72);
+    logFont.lfHeight -= PhMultiplyDivideSigned(3, CurrentParameters.WindowDpi, 72);
     CurrentParameters.MediumFont = CreateFontIndirect(&logFont);
 
-    logFont.lfHeight -= PhMultiplyDivide(3, CurrentParameters.WindowDpi, 72);
+    logFont.lfHeight -= PhMultiplyDivideSigned(3, CurrentParameters.WindowDpi, 72);
     CurrentParameters.LargeFont = CreateFontIndirect(&logFont);
 
     PhSipUpdateColorParameters();
@@ -1945,8 +1967,9 @@ VOID PhSipUpdateSummaryScrollInfo(
         return;
     }
 
-    SCROLLINFO si = {0};
-    si.cbSize = sizeof(si);
+    SCROLLINFO si;
+    RtlZeroMemory(&si, sizeof(SCROLLINFO));
+    si.cbSize = sizeof(SCROLLINFO);
     si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
     si.nMin = 0;
     si.nMax = max(0, SummaryContentHeight - 1);
@@ -1964,8 +1987,9 @@ VOID PhSipHandleSummaryVScroll(
     if (!PhSipSummaryScrollEnabled())
         return;
 
-    SCROLLINFO si = {0};
-    si.cbSize = sizeof(si);
+    SCROLLINFO si;
+    RtlZeroMemory(&si, sizeof(SCROLLINFO));
+    si.cbSize = sizeof(SCROLLINFO);
     si.fMask = SIF_TRACKPOS;
     GetScrollInfo(PhSipWindow, SB_VERT, &si);
 
@@ -2024,6 +2048,7 @@ VOID PhSipEnsureSummarySectionVisible(
         return;
 
     ULONG index;
+    RECT clientRect;
 
     for (index = 0; index < SectionList->Count; index++)
     {
@@ -2037,7 +2062,6 @@ VOID PhSipEnsureSummarySectionVisible(
     LONG top = CurrentParameters.WindowPadding + (LONG)index * SummaryGraphSpacing;
     LONG bottom = top + SummaryGraphHeight;
 
-    RECT clientRect;
     if (!PhGetClientRect(PhSipWindow, &clientRect))
         return;
 
@@ -2069,8 +2093,8 @@ VOID PhSipLayoutSummaryView(
     )
 {
     RECT clientRect;
-    ULONG availableHeight;
-    ULONG availableWidth;
+    LONG availableHeight;
+    LONG availableWidth;
     LONG graphHeight;
     ULONG i;
     PPH_SYSINFO_SECTION section;
@@ -2160,9 +2184,9 @@ VOID PhSipLayoutSectionView(
     )
 {
     RECT clientRect;
-    ULONG availableHeight;
-    ULONG availableWidth;
-    ULONG graphHeight;
+    LONG availableHeight;
+    LONG availableWidth;
+    LONG graphHeight;
     ULONG i;
     PPH_SYSINFO_SECTION section;
     HDWP deferHandle;
